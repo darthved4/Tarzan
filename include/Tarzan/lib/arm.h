@@ -1,6 +1,8 @@
 #ifndef ARM_H
 #define ARM_H
 
+#include <Tarzan/lib/madgwick.h>
+
 #include <stdint.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -11,7 +13,7 @@
 struct stepper_motor {
   const struct gpio_dt_spec dir;
   const struct gpio_dt_spec step;
-  const int channel; 
+  const int channel;
 };
 
 enum StepperDirection {
@@ -19,8 +21,6 @@ enum StepperDirection {
   HIGH_PULSE = 1,
   STOP_PULSE = 2,
 };
-
-extern struct quaternion q_est;
 
 /* store imu related data */
 struct joint {
@@ -32,8 +32,13 @@ struct joint {
   float yaw;
   float gyro_offset[3];
   float mag_offset[3];
+  float mag_scale[3];
+  struct madgwick_state orientation_filter;
   uint64_t prev_time;
 };
+
+/* Initialize sensor calibration defaults and independent orientation state. */
+void joint_init(struct joint *data);
 
 int Stepper_motor_write(const struct stepper_motor *motor, int dir, int pos);
 

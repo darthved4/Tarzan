@@ -1,0 +1,201 @@
+/{
+	pwmmotors {
+		compatible = "pwm-motors";
+		sabertooth1_1: pwm_1 {
+			pwms  = <&pwm2 1 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(1100)>;
+			max-pulse = <PWM_USEC(1900)>;
+			channel = <0>;
+		};
+		sabertooth1_2: pwm_2 {
+			pwms  = <&pwm2 2 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(1100)>;
+			max-pulse = <PWM_USEC(1900)>;
+			channel = <1>;
+		};
+		cytron1_1: pwm_3 {
+			pwms  = <&pwm2 3 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(1100)>;
+			max-pulse = <PWM_USEC(1900)>;
+			channel = <11>;
+		};
+		cytron1_2: pwm_4 {
+			pwms  = <&pwm2 4 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(1100)>;
+			max-pulse = <PWM_USEC(1900)>;
+			channel = <12>;
+		};
+		cytron2_1: pwm_5 {
+			pwms  = <&pwm4 1 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(1100)>;
+			max-pulse = <PWM_USEC(1900)>;
+			channel = <6>;
+		};
+		cytron2_2: pwm_6 {
+			pwms  = <&pwm4 2 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(1100)>;
+			max-pulse = <PWM_USEC(1900)>;
+			channel = <10>;
+		};
+		servo_1: pwm_7 {
+			pwms  = <&pwm4 3 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(500)>;
+			max-pulse = <PWM_USEC(2500)>;
+			channel = <8>;
+		};
+		servo_2: pwm_8 {
+			pwms  = <&pwm3 1 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(500)>;
+			max-pulse = <PWM_USEC(2500)>;
+			channel = <9>;
+		};
+		servo_3: pwm_9 {
+			pwms  = <&pwm3 2 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(500)>;
+			max-pulse = <PWM_USEC(2500)>;
+		};
+		servo_4: pwm_10 {
+			pwms  = <&pwm13 1 PWM_MSEC(20) (PWM_POLARITY_NORMAL)>;
+			min-pulse = <PWM_USEC(500)>;
+			max-pulse = <PWM_USEC(2500)>;
+		};
+	};
+
+	steppermotors {
+		compatible = "stepper-motors";
+		dm5422_tt: dm5422_tt {
+			label = "Turn Table";
+			dir-gpios = <&gpioe 13 GPIO_ACTIVE_LOW>;
+			step-gpios = <&gpiof 11 GPIO_ACTIVE_LOW>;
+			channel = <7>;
+		};
+		yako: yako {
+			label = "First Link";
+			dir-gpios = <&gpiob 7 GPIO_ACTIVE_LOW>;
+			step-gpios = <&gpioc 0 GPIO_ACTIVE_LOW>;
+			channel = <3>;
+		};
+		rhino: rhino {
+			label = "Second Link";
+			dir-gpios = <&gpiog 14 GPIO_ACTIVE_HIGH>;
+			step-gpios = <&gpiob 1 GPIO_ACTIVE_LOW>;
+			channel = <2>;
+		};
+		dm5422_pr1: dm5422_pr1 {
+			label = "Pitch Roll 1";
+			dir-gpios = <&gpioa 8 GPIO_ACTIVE_LOW>;
+			step-gpios = <&gpiog 12 GPIO_ACTIVE_LOW>;
+			channel = <4>;
+		};
+		dm5422_pr2: dm5422_pr2 {
+			label = "Pitch Roll 2";
+			dir-gpios = <&gpiog 9 GPIO_ACTIVE_LOW>;
+			step-gpios = <&gpiod 15 GPIO_ACTIVE_LOW>;
+			channel = <5>;
+		};
+	};
+
+	aliases {
+			sbc-uart = &cdc_acm_uart0;
+			telemetry-uart = &usart2;
+			sbus-uart = &usart6;
+     		/*	gps-uart = &gnss;*/
+	};
+
+	chosen {
+		zephyr,console = &usart3;
+		zephyr,shell-uart = &usart3;
+	};
+};
+
+&usart6 {
+	pinctrl-0 = <&usart6_tx_pc6 &usart6_rx_pc7>;
+	pinctrl-names= "default";
+	status = "okay";
+	current-speed = <100000>;
+};
+
+&usart2 {
+        pinctrl-0 = <&usart2_tx_pd5 &usart2_rx_pd6>;
+        pinctrl-names= "default";
+        status = "okay";
+        current-speed = <57600>;
+};
+
+&usart3 {
+    pinctrl-0 = <&usart3_tx_pd8 &usart3_rx_pd9>;
+    pinctrl-names = "default";
+    status = "okay";
+    current-speed = <115200>;
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+		status = "okay";
+		current-speed = <9600>;
+	};
+};
+
+&timers2 {
+	status = "okay";
+	st,prescaler = <5599>;
+	pwm2: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim2_ch1_pa0 &tim2_ch2_pa1 &tim2_ch3_pa2 &tim2_ch4_pa3>;
+		pinctrl-names = "default";
+	};
+};
+
+&timers4 {
+	status = "okay";
+	st,prescaler = <5599>;
+	pwm4: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim4_ch1_pd12 &tim4_ch2_pd13 &tim4_ch3_pd14>;
+		pinctrl-names = "default";
+	};
+};
+
+&timers3 {
+	status = "okay";
+	st,prescaler = <5599>;
+
+	pwm3: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim3_ch1_pb4 &tim3_ch2_pb5>;
+		pinctrl-names = "default";
+	};
+};
+
+&timers13 {
+	status = "okay";
+	st,prescaler = <5599>;
+
+	pwm13: pwm {
+		status = "okay";
+		pinctrl-0 = <&tim13_ch1_pa6>;
+		pinctrl-names = "default";
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb9>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+
+	/* IMU 0 — MPU6050, AD0 pin low */
+	imu0: mpu6050@68 {
+		compatible = "invensense,mpu6050";
+		reg = <0x68>;
+		status = "okay";
+	};
+
+	/* MAG 0 — LSM9DS1 magnetometer, SDO_M high -> 0x1E */
+	mag0: lsm9ds1_mag@1e {
+		compatible = "st,lsm9ds1_mag";
+		reg = <0x1e>;
+		status = "okay";
+	};
+};

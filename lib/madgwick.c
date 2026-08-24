@@ -1,170 +1,258 @@
 #include <Tarzan/lib/madgwick.h>
 
-struct quaternion q_est = { 1, 0, 0, 0 }; // initialize with as unit vector with real component = 1
+#include <math.h>
+#include <stddef.h>
 
-struct quaternion quat_mult(struct quaternion L, struct quaternion R) {
+#define MADGWICK_MAX_DT_SECONDS 0.5f
+#define MADGWICK_MIN_NORM_SQUARED 1.0e-20f
+#define RAD_TO_DEG 57.29577951308232f
 
-
-    struct quaternion product;
-    product.q1 = (L.q1 * R.q1) - (L.q2 * R.q2) - (L.q3 * R.q3) - (L.q4 * R.q4);
-    product.q2 = (L.q1 * R.q2) + (L.q2 * R.q1) + (L.q3 * R.q4) - (L.q4 * R.q3);
-    product.q3 = (L.q1 * R.q3) - (L.q2 * R.q4) + (L.q3 * R.q1) + (L.q4 * R.q2);
-    product.q4 = (L.q1 * R.q4) + (L.q2 * R.q3) - (L.q3 * R.q2) + (L.q4 * R.q1);
-
-    return product;
+static bool finite_vector3(float x, float y, float z) {
+  return isfinite(x) && isfinite(y) && isfinite(z);
 }
 
-// --- MODIFIED: Function signature updated for 9-DoF and variable dt ---
-void imu_filter(float ax, float ay, float az, float gx, float gy, float gz, float mx, float my, float mz, float dt) {
-
-    //Variables and constants
-    struct quaternion q_est_prev = q_est;
-    struct quaternion q_est_dot = { 0 };    // used as a place holder in equations 42 and 43
-    struct quaternion q_a = { 0, ax, ay, az }; // equation (24) raw acceleration values
-    struct quaternion q_m = { 0, mx, my, mz }; // --- NEW: raw magnetometer values ---
-
-    float F_g[3] = { 0 }; // equation(15/21/25) objective function for gravity
-    float J_g[3][4] = { 0 }; // jacobian matrix for gravity
-    
-    // --- NEW: Variables for magnetometer ---
-    float F_m[3] = { 0 };     // objective function for magnetism
-    float J_m[3][4] = { 0 };  // jacobian matrix for magnetism
-    struct quaternion gradient_g = { 0 }; // gravity gradient
-    struct quaternion gradient_m = { 0 }; // magnetism gradient
-    struct quaternion gradient_total = { 0 }; // combined gradient
-    struct quaternion h = { 0 };    // estimated magnetic field vector in earth frame
-    float b_x = 0.0f;             // earth's magnetic field horizontal component
-    float b_z = 0.0f;             // earth's magnetic field vertical component
-
-    /* Integrate angluar velocity to obtain position in angles. */
-    struct quaternion q_w; // equation (10), places gyroscope readings in a quaternion
-    q_w.q1 = 0; // the real component is zero
-    q_w.q2 = gx;
-    q_w.q3 = gy;
-    q_w.q4 = gz;
-
-    quat_scalar(&q_w, 0.5); // equation (12) dq/dt = (1/2)q*w
-    q_w = quat_mult(q_est_prev, q_w); // equation (12)
-
-    // --- Normalize sensor measurements ---
-    quat_Normalization(&q_a); // normalize the acceleration quaternion
-    quat_Normalization(&q_m); // --- NEW: normalize the magnetometer quaternion ---
-
-    // --- Pre-calculate reused quaternion components ---
-    float q1 = q_est_prev.q1;
-    float q2 = q_est_prev.q2;
-    float q3 = q_est_prev.q3;
-    float q4 = q_est_prev.q4;
-    float _2q1 = 2.0f * q1;
-    float _2q2 = 2.0f * q2;
-    float _2q3 = 2.0f * q3;
-    float _2q4 = 2.0f * q4;
-    // float _q1q1 = q1 * q1;
-    float _q2q2 = q2 * q2;
-    float _q3q3 = q3 * q3;
-    float _q4q4 = q4 * q4;
-    
-    // --- 1. GRAVITY GRADIENT DESCENT ---
-
-    //Compute the objective function for gravity, equation(25)
-    F_g[0] = 2.0f * (q2 * q4 - q1 * q3) - q_a.q2;
-    F_g[1] = 2.0f * (q1 * q2 + q3 * q4) - q_a.q3;
-    F_g[2] = 2.0f * (0.5f - _q2q2 - _q3q3) - q_a.q4;
-
-    //Compute the Jacobian matrix, equation (26), for gravity
-    J_g[0][0] = -_2q3;
-    J_g[0][1] = _2q4;
-    J_g[0][2] = -_2q1;
-    J_g[0][3] = _2q2;
-
-    J_g[1][0] = _2q2;
-    J_g[1][1] = _2q1;
-    J_g[1][2] = _2q4;
-    J_g[1][3] = _2q3;
-
-    J_g[2][0] = 0;
-    J_g[2][1] = -4.0f * q2;
-    J_g[2][2] = -4.0f * q3;
-    J_g[2][3] = 0;
-
-    // now computer the gradient, equation (20), gradient_g = J_g'*F_g
-    gradient_g.q1 = J_g[0][0] * F_g[0] + J_g[1][0] * F_g[1] + J_g[2][0] * F_g[2];
-    gradient_g.q2 = J_g[0][1] * F_g[0] + J_g[1][1] * F_g[1] + J_g[2][1] * F_g[2];
-    gradient_g.q3 = J_g[0][2] * F_g[0] + J_g[1][2] * F_g[1] + J_g[2][2] * F_g[2];
-    gradient_g.q4 = J_g[0][3] * F_g[0] + J_g[1][3] * F_g[1] + J_g[2][3] * F_g[2];
-
-
-    // --- 2. MAGNETOMETER GRADIENT DESCENT ---
-    
-    // Calculate reference magnetic field vector (h) in Earth frame (Eq 38)
-    // h = q_est * q_m * q_est_conjugate
-    struct quaternion q_est_conj = quat_conjugate(q_est_prev);
-    h = quat_mult(q_est_prev, q_m);
-    h = quat_mult(h, q_est_conj);
-
-    // Calculate reference magnetic field direction (b) (Eq 39)
-    // b_x = sqrt(h_x^2 + h_y^2)
-    // b_z = h_z
-    b_x = sqrtf(h.q2 * h.q2 + h.q3 * h.q3);
-    b_z = h.q4;
-
-    // Pre-calculate reused mag terms
-    float _2bx = 2.0f * b_x;
-    float _2bz = 2.0f * b_z;
-    float _4bx = 4.0f * b_x;
-    float _4bz = 4.0f * b_z;
-
-    //Compute the objective function for magnetism, equation(40)
-    F_m[0] = _2bx * (0.5f - _q3q3 - _q4q4) + _2bz * (q2 * q4 - q1 * q3) - q_m.q2;
-    F_m[1] = _2bx * (q2 * q3 - q1 * q4) + _2bz * (q1 * q2 + q3 * q4) - q_m.q3;
-    F_m[2] = _2bx * (q1 * q3 + q2 * q4) + _2bz * (0.5f - _q2q2 - _q3q3) - q_m.q4;
-
-    //Compute the Jacobian matrix, equation (41), for magnetism
-    J_m[0][0] = -_2bz * q3;
-    J_m[0][1] = _2bz * q4;
-    J_m[0][2] = -_4bx * q3 + _2bz * q2;
-    J_m[0][3] = -_4bx * q4 + _2bz * q1;
-
-    J_m[1][0] = -_2bx * q4 + _2bz * q2;
-    J_m[1][1] = _2bx * q3 + _2bz * q1;
-    J_m[1][2] = _2bx * q2 + _2bz * q4;
-    J_m[1][3] = -_2bx * q1 + _2bz * q3;
-
-    J_m[2][0] = _2bx * q3;
-    J_m[2][1] = _2bx * q4 - _4bz * q2;
-    J_m[2][2] = _2bx * q1 - _4bz * q3;
-    J_m[2][3] = _2bx * q2;
-
-    // now computer the magnetometer gradient, gradient_m = J_m'*F_m
-    gradient_m.q1 = J_m[0][0] * F_m[0] + J_m[1][0] * F_m[1] + J_m[2][0] * F_m[2];
-    gradient_m.q2 = J_m[0][1] * F_m[0] + J_m[1][1] * F_m[1] + J_m[2][1] * F_m[2];
-    gradient_m.q3 = J_m[0][2] * F_m[0] + J_m[1][2] * F_m[1] + J_m[2][2] * F_m[2];
-    gradient_m.q4 = J_m[0][3] * F_m[0] + J_m[1][3] * F_m[1] + J_m[2][3] * F_m[2];
-    
-
-    // --- 3. COMBINE AND INTEGRATE ---
-    
-    // Combine gradients
-    quat_add(&gradient_total, gradient_g, gradient_m);
-    
-    // --- MODIFIED: Use combined gradient ---
-    quat_scalar(&gradient_total, BETA); // multiply total gradient by beta
-    quat_sub(&q_est_dot, q_w, gradient_total); // subtract above from q_w, the integrated gyro quaternion
-
-    // --- MODIFIED: Use variable dt ---
-    quat_scalar(&q_est_dot, dt);
-    quat_add(&q_est, q_est_prev, q_est_dot); // Integrate orientation rate to find position
-    quat_Normalization(&q_est); // normalize the orientation of the estimate
+static float inverse_sqrt(float value) {
+  if (!isfinite(value) || value <= MADGWICK_MIN_NORM_SQUARED) {
+    return 0.0f;
+  }
+  return 1.0f / sqrtf(value);
 }
 
-void eulerAngles(struct quaternion q, float* roll, float* pitch, float* yaw) {
+static bool state_is_valid(const struct madgwick_state *state) {
+  if (state == NULL || !isfinite(state->beta) || state->beta < 0.0f) {
+    return false;
+  }
 
-    *yaw = atan2f((2.0f * q.q2 * q.q3 - 2.0f * q.q1 * q.q4), (2.0f * q.q1 * q.q1 + 2.0f * q.q2 * q.q2 - 1.0f)); // equation (7)
-    *pitch = -asinf(2.0f * q.q2 * q.q4 + 2.0f * q.q1 * q.q3); // equatino (8)
-    *roll = atan2f((2.0f * q.q3 * q.q4 - 2.0f * q.q1 * q.q2), (2.0f * q.q1 * q.q1 + 2.0f * q.q4 * q.q4 - 1.0f));
+  const struct quaternion *q = &state->orientation;
+  return isfinite(q->w) && isfinite(q->x) && isfinite(q->y) &&
+         isfinite(q->z);
+}
 
-    *yaw *= (180.0f / PI);
-    *pitch *= (180.0f / PI);
-    *roll *= (180.0f / PI);
+static bool commit_orientation(struct madgwick_state *state,
+                               float w, float x, float y, float z) {
+  const float inverse_norm =
+      inverse_sqrt(w * w + x * x + y * y + z * z);
+  if (inverse_norm == 0.0f) {
+    return false;
+  }
 
+  state->orientation.w = w * inverse_norm;
+  state->orientation.x = x * inverse_norm;
+  state->orientation.y = y * inverse_norm;
+  state->orientation.z = z * inverse_norm;
+  return true;
+}
+
+void madgwick_init(struct madgwick_state *state, float beta) {
+  if (state == NULL) {
+    return;
+  }
+
+  state->orientation =
+      (struct quaternion){.w = 1.0f, .x = 0.0f, .y = 0.0f, .z = 0.0f};
+  state->beta =
+      isfinite(beta) && beta >= 0.0f ? beta : MADGWICK_BETA_DEFAULT;
+}
+
+bool madgwick_update_imu(struct madgwick_state *state,
+                         float ax, float ay, float az,
+                         float gx, float gy, float gz,
+                         float dt_seconds) {
+  if (!state_is_valid(state) || !finite_vector3(ax, ay, az) ||
+      !finite_vector3(gx, gy, gz) || !isfinite(dt_seconds) ||
+      dt_seconds <= 0.0f || dt_seconds > MADGWICK_MAX_DT_SECONDS) {
+    return false;
+  }
+
+  float inverse_norm = inverse_sqrt(ax * ax + ay * ay + az * az);
+  if (inverse_norm == 0.0f) {
+    return false;
+  }
+
+  ax *= inverse_norm;
+  ay *= inverse_norm;
+  az *= inverse_norm;
+
+  const float w = state->orientation.w;
+  const float x = state->orientation.x;
+  const float y = state->orientation.y;
+  const float z = state->orientation.z;
+
+  const float f1 = 2.0f * (x * z - w * y) - ax;
+  const float f2 = 2.0f * (w * x + y * z) - ay;
+  const float f3 = 2.0f * (0.5f - x * x - y * y) - az;
+
+  float s1 = -2.0f * y * f1 + 2.0f * x * f2;
+  float s2 = 2.0f * z * f1 + 2.0f * w * f2 - 4.0f * x * f3;
+  float s3 = -2.0f * w * f1 + 2.0f * z * f2 - 4.0f * y * f3;
+  float s4 = 2.0f * x * f1 + 2.0f * y * f2;
+
+  inverse_norm = inverse_sqrt(s1 * s1 + s2 * s2 + s3 * s3 + s4 * s4);
+  if (inverse_norm != 0.0f) {
+    s1 *= inverse_norm;
+    s2 *= inverse_norm;
+    s3 *= inverse_norm;
+    s4 *= inverse_norm;
+  } else {
+    s1 = 0.0f;
+    s2 = 0.0f;
+    s3 = 0.0f;
+    s4 = 0.0f;
+  }
+
+  const float q_dot_w =
+      0.5f * (-x * gx - y * gy - z * gz) - state->beta * s1;
+  const float q_dot_x =
+      0.5f * (w * gx + y * gz - z * gy) - state->beta * s2;
+  const float q_dot_y =
+      0.5f * (w * gy - x * gz + z * gx) - state->beta * s3;
+  const float q_dot_z =
+      0.5f * (w * gz + x * gy - y * gx) - state->beta * s4;
+
+  return commit_orientation(state,
+                            w + q_dot_w * dt_seconds,
+                            x + q_dot_x * dt_seconds,
+                            y + q_dot_y * dt_seconds,
+                            z + q_dot_z * dt_seconds);
+}
+
+bool madgwick_update(struct madgwick_state *state,
+                     float ax, float ay, float az,
+                     float gx, float gy, float gz,
+                     float mx, float my, float mz,
+                     float dt_seconds) {
+  if (!state_is_valid(state) || !finite_vector3(ax, ay, az) ||
+      !finite_vector3(gx, gy, gz) || !finite_vector3(mx, my, mz) ||
+      !isfinite(dt_seconds) || dt_seconds <= 0.0f ||
+      dt_seconds > MADGWICK_MAX_DT_SECONDS) {
+    return false;
+  }
+
+  float inverse_norm = inverse_sqrt(ax * ax + ay * ay + az * az);
+  if (inverse_norm == 0.0f) {
+    return false;
+  }
+
+  const float magnetic_norm_squared = mx * mx + my * my + mz * mz;
+  if (inverse_sqrt(magnetic_norm_squared) == 0.0f) {
+    return madgwick_update_imu(state, ax, ay, az, gx, gy, gz,
+                               dt_seconds);
+  }
+
+  ax *= inverse_norm;
+  ay *= inverse_norm;
+  az *= inverse_norm;
+
+  inverse_norm = inverse_sqrt(magnetic_norm_squared);
+  mx *= inverse_norm;
+  my *= inverse_norm;
+  mz *= inverse_norm;
+
+  const float w = state->orientation.w;
+  const float x = state->orientation.x;
+  const float y = state->orientation.y;
+  const float z = state->orientation.z;
+
+  const float hx =
+      2.0f * mx * (0.5f - y * y - z * z) +
+      2.0f * my * (x * y - w * z) +
+      2.0f * mz * (x * z + w * y);
+  const float hy =
+      2.0f * mx * (x * y + w * z) +
+      2.0f * my * (0.5f - x * x - z * z) +
+      2.0f * mz * (y * z - w * x);
+  const float bx = sqrtf(hx * hx + hy * hy);
+  const float bz =
+      2.0f * mx * (x * z - w * y) +
+      2.0f * my * (y * z + w * x) +
+      2.0f * mz * (0.5f - x * x - y * y);
+
+  const float f1 = 2.0f * (x * z - w * y) - ax;
+  const float f2 = 2.0f * (w * x + y * z) - ay;
+  const float f3 = 2.0f * (0.5f - x * x - y * y) - az;
+  const float f4 =
+      2.0f * bx * (0.5f - y * y - z * z) +
+      2.0f * bz * (x * z - w * y) - mx;
+  const float f5 =
+      2.0f * bx * (x * y - w * z) +
+      2.0f * bz * (w * x + y * z) - my;
+  const float f6 =
+      2.0f * bx * (w * y + x * z) +
+      2.0f * bz * (0.5f - x * x - y * y) - mz;
+
+  float s1 =
+      -2.0f * y * f1 + 2.0f * x * f2 -
+      2.0f * bz * y * f4 +
+      (-2.0f * bx * z + 2.0f * bz * x) * f5 +
+      2.0f * bx * y * f6;
+  float s2 =
+      2.0f * z * f1 + 2.0f * w * f2 - 4.0f * x * f3 +
+      2.0f * bz * z * f4 +
+      (2.0f * bx * y + 2.0f * bz * w) * f5 +
+      (2.0f * bx * z - 4.0f * bz * x) * f6;
+  float s3 =
+      -2.0f * w * f1 + 2.0f * z * f2 - 4.0f * y * f3 +
+      (-4.0f * bx * y - 2.0f * bz * w) * f4 +
+      (2.0f * bx * x + 2.0f * bz * z) * f5 +
+      (2.0f * bx * w - 4.0f * bz * y) * f6;
+  float s4 =
+      2.0f * x * f1 + 2.0f * y * f2 +
+      (-4.0f * bx * z + 2.0f * bz * x) * f4 +
+      (-2.0f * bx * w + 2.0f * bz * y) * f5 +
+      2.0f * bx * x * f6;
+
+  inverse_norm = inverse_sqrt(s1 * s1 + s2 * s2 + s3 * s3 + s4 * s4);
+  if (inverse_norm != 0.0f) {
+    s1 *= inverse_norm;
+    s2 *= inverse_norm;
+    s3 *= inverse_norm;
+    s4 *= inverse_norm;
+  } else {
+    s1 = 0.0f;
+    s2 = 0.0f;
+    s3 = 0.0f;
+    s4 = 0.0f;
+  }
+
+  const float q_dot_w =
+      0.5f * (-x * gx - y * gy - z * gz) - state->beta * s1;
+  const float q_dot_x =
+      0.5f * (w * gx + y * gz - z * gy) - state->beta * s2;
+  const float q_dot_y =
+      0.5f * (w * gy - x * gz + z * gx) - state->beta * s3;
+  const float q_dot_z =
+      0.5f * (w * gz + x * gy - y * gx) - state->beta * s4;
+
+  return commit_orientation(state,
+                            w + q_dot_w * dt_seconds,
+                            x + q_dot_x * dt_seconds,
+                            y + q_dot_y * dt_seconds,
+                            z + q_dot_z * dt_seconds);
+}
+
+void madgwick_get_euler(const struct quaternion *orientation,
+                        float *roll, float *pitch, float *yaw) {
+  if (orientation == NULL || roll == NULL || pitch == NULL || yaw == NULL) {
+    return;
+  }
+
+  const float w = orientation->w;
+  const float x = orientation->x;
+  const float y = orientation->y;
+  const float z = orientation->z;
+
+  *roll = atan2f(2.0f * (w * x + y * z),
+                 1.0f - 2.0f * (x * x + y * y)) *
+          RAD_TO_DEG;
+
+  const float sin_pitch = 2.0f * (w * y - z * x);
+  if (fabsf(sin_pitch) >= 1.0f) {
+    *pitch = copysignf(90.0f, sin_pitch);
+  } else {
+    *pitch = asinf(sin_pitch) * RAD_TO_DEG;
+  }
+
+  *yaw = atan2f(2.0f * (w * z + x * y),
+                1.0f - 2.0f * (y * y + z * z)) *
+         RAD_TO_DEG;
 }

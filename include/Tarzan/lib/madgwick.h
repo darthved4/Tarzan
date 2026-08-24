@@ -1,80 +1,44 @@
-#ifndef MADGWICK_FILTER_H
-#define MADGWICK_FILTER_H
+#ifndef TARZAN_MADGWICK_H
+#define TARZAN_MADGWICK_H
 
-#include <math.h>
+#include <stdbool.h>
 
-#define PI 3.14159265358979f
-#define BETA 0.3f // Start with this value. Try 0.5 if it still drifts.
+#define MADGWICK_BETA_DEFAULT 0.3f
 
 struct quaternion {
-  float q1;
-  float q2;
-  float q3;
-  float q4;
+  float w;
+  float x;
+  float y;
+  float z;
 };
 
-// global variables
-extern struct quaternion q_est;
+struct madgwick_state {
+  struct quaternion orientation;
+  float beta;
+};
 
-// Multiply two quaternions and return a copy of the result, prod = L * R
-struct quaternion quat_mult(struct quaternion q_L, struct quaternion q_R);
+/* Initialize an independent filter instance. A negative or non-finite beta
+ * selects MADGWICK_BETA_DEFAULT. */
+void madgwick_init(struct madgwick_state *state, float beta);
 
-// Multiply a reference of a quaternion by a scalar, q = s*q
-static inline void quat_scalar(struct quaternion *q, float scalar) {
-  q->q1 *= scalar;
-  q->q2 *= scalar;
-  q->q3 *= scalar;
-  q->q4 *= scalar;
-}
+/* Update orientation from accelerometer, gyroscope, and magnetometer data.
+ * Accelerometer units may be any consistent linear-acceleration unit,
+ * gyroscope inputs are rad/s, and dt_seconds is seconds. Invalid
+ * magnetometer data automatically selects the 6-DoF update. */
+bool madgwick_update(struct madgwick_state *state,
+                     float ax, float ay, float az,
+                     float gx, float gy, float gz,
+                     float mx, float my, float mz,
+                     float dt_seconds);
 
-// Adds two quaternions together and the sum is the pointer to another
-// quaternion, Sum = L + R
-static inline void quat_add(struct quaternion *Sum, struct quaternion L,
-                            struct quaternion R) {
-  Sum->q1 = L.q1 + R.q1;
-  Sum->q2 = L.q2 + R.q2;
-  Sum->q3 = L.q3 + R.q3;
-  Sum->q4 = L.q4 + R.q4;
-}
+/* Update orientation from accelerometer and gyroscope data only. */
+bool madgwick_update_imu(struct madgwick_state *state,
+                         float ax, float ay, float az,
+                         float gx, float gy, float gz,
+                         float dt_seconds);
 
-// Subtracts two quaternions together and the sum is the pointer to another
-// quaternion, sum = L - R
-static inline void quat_sub(struct quaternion *Sum, struct quaternion L,
-                            struct quaternion R) {
-  Sum->q1 = L.q1 - R.q1;
-  Sum->q2 = L.q2 - R.q2;
-  Sum->q3 = L.q3 - R.q3;
-  Sum->q4 = L.q4 - R.q4;
-}
+/* Convert a quaternion to ZYX roll, pitch, and yaw angles in degrees. */
+void madgwick_get_euler(const struct quaternion *orientation,
+                        float *roll, float *pitch, float *yaw);
 
-// the conjugate of a quaternion is it's imaginary component sign changed q* =
-// [s, -v] if q = [s, v]
-static inline struct quaternion quat_conjugate(struct quaternion q) {
-  q.q2 = -q.q2;
-  q.q3 = -q.q3;
-  q.q4 = -q.q4;
-  return q;
-}
-
-static inline float quat_Norm(struct quaternion q) {
-  return sqrtf(q.q1 * q.q1 + q.q2 * q.q2 + q.q3 * q.q3 + q.q4 * q.q4);
-}
-
-// Normalizes pointer q by calling quat_Norm(q),
-static inline void quat_Normalization(struct quaternion *q) {
-  float norm = quat_Norm(*q);
-  if (norm == 0.0f)
-    return; // handle divide by zero
-  q->q1 /= norm;
-  q->q2 /= norm;
-  q->q3 /= norm;
-  q->q4 /= norm;
-}
-
-// This is the correct 9-DoF function prototype
-void imu_filter(float ax, float ay, float az, float gx, float gy, float gz,
-                float mx, float my, float mz, float dt);
-
-void eulerAngles(struct quaternion q, float *roll, float *pitch, float *yaw);
-
-#endif /* MADGWICK_FILTER_H */
+#endif /* TARZAN_MADGWICK_H */

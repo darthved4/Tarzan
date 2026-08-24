@@ -78,9 +78,9 @@ void send_imu_data(uint8_t buf[], struct inverse_msg *data) {
 int main() {
   uint32_t dtr = 0;
 
-  struct joint lowerIMU = {{0, 0, 0}, {0, 0, 0}, 0, 0, 0, {0, 0, 0}};
-  struct joint upperIMU = {{0, 0, 0}, {0, 0, 0}, 0, 0, 0, {0, 0, 0}};
-  struct joint endIMU = {{0, 0, 0}, {0, 0, 0}, 0, 0, 0, {0, 0, 0}};
+  struct joint lowerIMU = {0};
+  struct joint upperIMU = {0};
+  struct joint endIMU = {0};
 
   k_work_init(&work, inverse_mssg_work_handler);
 

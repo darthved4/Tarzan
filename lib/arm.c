@@ -1,8 +1,8 @@
 #include <Tarzan/lib/arm.h>
-#include <Tarzan/lib/madgwick.h>
 #include <float.h>
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 
@@ -37,33 +37,55 @@ int Stepper_motor_write(const struct stepper_motor *motor, int dir, int pos) {
   return pos;
 }
 
+void joint_init(struct joint *data) {
+  if (data == NULL) {
+    return;
+  }
+
+  memset(data, 0, sizeof(*data));
+  data->mag_scale[0] = 1.0f;
+  data->mag_scale[1] = 1.0f;
+  data->mag_scale[2] = 1.0f;
+  madgwick_init(&data->orientation_filter, MADGWICK_BETA_DEFAULT);
+}
+
 /*Calibration for imu
  * param:
  * dev: imu device
  * data: struct joint
  * returns: 0 if calibration succesfull*/
 int calibrate_gyro(const struct device *dev, struct joint *data) {
-  struct sensor_value gyro[3];
-  float true_gyro = 0;
-  int rc;
-  for (int i = 0; i < 1000; i++) {
-
-    rc = sensor_sample_fetch(dev);
-
-    if (rc == 0) {
-      rc = sensor_channel_get(dev, SENSOR_CHAN_GYRO_XYZ, gyro);
-
-      for (int i = 0; i < 3; i++)
-        data->gyro_offset[i] += (sensor_value_to_float(&gyro[i]) - true_gyro);
-      k_sleep(K_MSEC(1));
-    } else
-      break;
-  }
-  if (rc == 0) {
-    for (int i = 0; i < 3; i++)
-      data->gyro_offset[i] = data->gyro_offset[i] / 1000.0f;
-  } else
+  if (dev == NULL || data == NULL) {
     return 1;
+  }
+
+  struct sensor_value gyro[3];
+  int rc;
+
+  for (int axis = 0; axis < 3; axis++) {
+    data->gyro_offset[axis] = 0.0f;
+  }
+
+  for (int sample = 0; sample < 1000; sample++) {
+    rc = sensor_sample_fetch(dev);
+    if (rc != 0) {
+      return 1;
+    }
+
+    rc = sensor_channel_get(dev, SENSOR_CHAN_GYRO_XYZ, gyro);
+    if (rc != 0) {
+      return 1;
+    }
+
+    for (int axis = 0; axis < 3; axis++) {
+      data->gyro_offset[axis] += sensor_value_to_float(&gyro[axis]);
+    }
+    k_sleep(K_MSEC(1));
+  }
+
+  for (int axis = 0; axis < 3; axis++) {
+    data->gyro_offset[axis] /= 1000.0f;
+  }
 
   return 0;
 }
@@ -138,37 +160,53 @@ enum StepperDirection update_proportional(float target_angel,
 int madgwick_filter(const struct device *const mag_dev,
                     const struct device *const imu_dev, struct joint *data) {
 
-  struct sensor_value Mag[3];
-  struct sensor_value Accel[3];
-  struct sensor_value Gyro[3];
+  if (mag_dev == NULL || imu_dev == NULL || data == NULL) {
+    return 1;
+  }
+
+  struct sensor_value mag[3];
+  struct sensor_value accel[3];
+  struct sensor_value gyro[3];
 
   uint64_t current_time = k_uptime_get();
 
-  float dt = (current_time - data->prev_time) / 1000.0;
+  if (data->prev_time == 0U) {
+    data->prev_time = current_time;
+    return 1;
+  }
 
-  if (dt <= 0.0f || dt > 0.1f) {
-    k_msleep(1);
+  float dt = (current_time - data->prev_time) / 1000.0f;
+  data->prev_time = current_time;
+
+  if (dt <= 0.0f || dt > 0.5f) {
+    return 1;
   }
 
   if (!sensor_sample_fetch(mag_dev) && !sensor_sample_fetch(imu_dev)) {
-    if (sensor_channel_get(mag_dev, SENSOR_CHAN_MAGN_XYZ, Mag))
+    if (sensor_channel_get(mag_dev, SENSOR_CHAN_MAGN_XYZ, mag))
       return 1;
-    if (sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_XYZ, Gyro))
+    if (sensor_channel_get(imu_dev, SENSOR_CHAN_ACCEL_XYZ, accel))
       return 1;
-    if (sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, Accel))
+    if (sensor_channel_get(imu_dev, SENSOR_CHAN_GYRO_XYZ, gyro))
       return 1;
 
     for (int i = 0; i < 3; i++) {
-      data->accel[i] = sensor_value_to_float(&Accel[i]);
-      data->gyro[i] = sensor_value_to_float(&Gyro[i]);
-      data->mag[i] = sensor_value_to_float(&Mag[i]);
+      data->accel[i] = sensor_value_to_float(&accel[i]);
+      data->gyro[i] = sensor_value_to_float(&gyro[i]) - data->gyro_offset[i];
+      data->mag[i] =
+          (sensor_value_to_float(&mag[i]) - data->mag_offset[i]) *
+          data->mag_scale[i];
     }
 
-    imu_filter(data->accel[0], data->accel[1], data->accel[2], data->gyro[0],
-               data->gyro[1], data->gyro[2], data->mag[0], data->mag[1],
-               data->mag[2], dt);
+    if (!madgwick_update(
+            &data->orientation_filter, data->accel[0], data->accel[1],
+            data->accel[2], data->gyro[0], data->gyro[1], data->gyro[2],
+            data->mag[0], data->mag[1], data->mag[2], dt)) {
+      return 1;
+    }
 
-    eulerAngles(q_est, &data->roll, &data->pitch, &data->yaw);
+    madgwick_get_euler(&data->orientation_filter.orientation, &data->roll,
+                       &data->pitch, &data->yaw);
 
     return 0;
   }
@@ -183,35 +221,67 @@ int madgwick_filter(const struct device *const mag_dev,
  * returns: 0 if successfull*/
 int calibrate_magnetometer(const struct device *dev, struct joint *data) {
 
-  struct sensor_value mag[3];
-  int rc = 0;
-
-  double mag_max[3] = {-DBL_MAX, -DBL_MAX, -DBL_MAX};
-  double mag_min[3] = {DBL_MAX, DBL_MAX, DBL_MAX};
-
-  for (int i = 1; i < 2000; i++) {
-    rc = sensor_sample_fetch(dev);
-    if (rc == 0) {
-      rc = sensor_channel_get(dev, SENSOR_CHAN_MAGN_XYZ, mag);
-      for (int i = 0; i < 3; i++) {
-        double val = sensor_value_to_double(&mag[i]);
-        if (val > mag_max[i]) {
-          mag_max[i] = val;
-        }
-        if (val < mag_min[i]) {
-          mag_min[i] = val;
-        }
-      }
-    } else
-      break;
-    k_sleep(K_MSEC(1));
-  }
-  if (rc == 0) {
-    for (int i = 0; i < 3; i++) {
-      data->mag_offset[i] = (mag_max[i] + mag_min[i]) / 2.0;
-    }
-  } else
+  if (dev == NULL || data == NULL) {
     return 1;
+  }
+
+  struct sensor_value mag[3];
+
+  float mag_max[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+  float mag_min[3] = { FLT_MAX,  FLT_MAX,  FLT_MAX};
+
+  int rc;
+
+  const int samples = 4000;
+
+  for (int axis = 0; axis < 3; axis++) {
+    data->mag_offset[axis] = 0.0f;
+    data->mag_scale[axis] = 1.0f;
+  }
+
+  for (int sample = 0; sample < samples; sample++) {
+
+    rc = sensor_sample_fetch(dev);
+    if (rc != 0) {
+      return 1;
+    }
+
+    rc = sensor_channel_get(dev, SENSOR_CHAN_MAGN_XYZ, mag);
+    if (rc != 0) {
+      return 1;
+    }
+
+    for (int axis = 0; axis < 3; axis++) {
+      float val = sensor_value_to_float(&mag[axis]);
+
+      if (val > mag_max[axis]) {
+        mag_max[axis] = val;
+      }
+
+      if (val < mag_min[axis]) {
+        mag_min[axis] = val;
+      }
+    }
+
+    k_sleep(K_MSEC(5));
+  }
+
+  float radius[3];
+
+  for (int axis = 0; axis < 3; axis++) {
+    data->mag_offset[axis] = 0.5f * (mag_max[axis] + mag_min[axis]);
+    radius[axis] = 0.5f * (mag_max[axis] - mag_min[axis]);
+
+    if (radius[axis] <= 1e-6f) {
+      return 2;
+    }
+  }
+
+  float avg_radius = (radius[0] + radius[1] + radius[2]) / 3.0f;
+
+  for (int axis = 0; axis < 3; axis++) {
+    data->mag_scale[axis] = avg_radius / radius[axis];
+  }
 
   return 0;
 }
