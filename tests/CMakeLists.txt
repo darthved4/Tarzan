@@ -22,3 +22,14 @@ target_link_libraries(madgwick_filter_test PRIVATE m)
 target_compile_features(madgwick_filter_test PRIVATE c_std_11)
 target_compile_options(madgwick_filter_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME madgwick_filter_test COMMAND madgwick_filter_test)
+
+add_executable(orientation_test
+    orientation_test.c
+    ../lib/orientation.c
+    ../lib/madgwick.c
+)
+target_include_directories(orientation_test PRIVATE ../include)
+target_link_libraries(orientation_test PRIVATE m)
+target_compile_features(orientation_test PRIVATE c_std_11)
+target_compile_options(orientation_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME orientation_test COMMAND orientation_test)
