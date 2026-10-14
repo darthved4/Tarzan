@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zephyr/device.h>
@@ -13,6 +14,7 @@
 #include <zephyr/kernel/thread_stack.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/crc.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/usb/usb_device.h>
@@ -20,6 +22,7 @@
 #include <Tarzan/lib/arm.h>
 #include <Tarzan/lib/cobs.h>
 #include <Tarzan/lib/drive.h>
+#include <Tarzan/lib/pid.h>
 #include <Tarzan/lib/sbus.h>
 
 LOG_MODULE_REGISTER(Tarzan, CONFIG_TARZAN_LOG_LEVEL);
@@ -28,6 +31,13 @@ LOG_MODULE_REGISTER(Tarzan, CONFIG_TARZAN_LOG_LEVEL);
 #define PRIORITY 2        // work_q thread priority
 #define STEPPER_TIMER 100 // stepper pulse width in microseconds
 #define JERK_LIMITER false
+#define ARM_JOINT_COUNT 5
+#define ARM_PID_PERIOD_MS 10
+#define ARM_PID_DT_SECONDS ((float)ARM_PID_PERIOD_MS / 1000.0f)
+#define ARM_PID_DEADBAND_RAD 0.00872664626f /* 0.5 degrees */
+#define STEPPER_TIMER_HZ (2000000U / STEPPER_TIMER)
+#define STEPPER_PHASES_PER_PULSE 4U
+#define TWO_PI_F 6.28318530718f
 
 /* sbus uart */
 static const struct device *const sbus_uart =
@@ -112,10 +122,22 @@ struct drive_arg {
 
 /* struct for arm variables */
 struct arm_arg {
-  enum StepperDirection dir[5];
-  int pos[5];
+  enum StepperDirection dir[ARM_JOINT_COUNT];
+  int pos[ARM_JOINT_COUNT];
   struct k_work channel_work_item;
+  struct k_work_delayable pid_work_item;
+  struct pid_controller pid[ARM_JOINT_COUNT];
+  float target_angle[ARM_JOINT_COUNT];
+  float measured_angle[ARM_JOINT_COUNT];
+  uint32_t pulse_accumulator[ARM_JOINT_COUNT];
+  atomic_t pid_rate_pps[ARM_JOINT_COUNT];
+  atomic_t closed_loop_enabled;
 } arm;
+
+/* FL is confirmed as 400 motor pulses/rev * 8.15:1. The remaining entries
+ * are placeholders until each joint drivetrain is confirmed. */
+static const float pulses_per_joint_revolution[ARM_JOINT_COUNT] = {
+    3260.0f, 3260.0f, 3260.0f, 3260.0f, 3260.0f};
 
 /* struct for communication */
 struct com_rx_arg {
@@ -399,10 +421,69 @@ void arm_channel_work_handler(struct k_work *work_ptr) {
   k_mutex_unlock(&ch_reader_cnt_mutex);
 }
 
+/* Closed-loop arm work handler. The sensor/filter work handler will update
+ * measured_angle, set target_angle, and enable closed_loop_enabled once its
+ * hardware mapping is finalized. Until then this path remains safely idle. */
+void arm_pid_work_handler(struct k_work *work_ptr) {
+  struct k_work_delayable *delayable = k_work_delayable_from_work(work_ptr);
+  struct arm_arg *arm_info =
+      CONTAINER_OF(delayable, struct arm_arg, pid_work_item);
+
+  if (!atomic_get(&arm_info->closed_loop_enabled)) {
+    for (size_t i = 0U; i < ARRAY_SIZE(arm_info->pid); i++) {
+      atomic_set(&arm_info->pid_rate_pps[i], 0);
+      pid_reset(&arm_info->pid[i]);
+    }
+  } else {
+    for (size_t i = 0U; i < ARRAY_SIZE(arm_info->pid); i++) {
+      const float error =
+          arm_info->target_angle[i] - arm_info->measured_angle[i];
+      float velocity = 0.0f;
+
+      if (isfinite(error) && fabsf(error) > ARM_PID_DEADBAND_RAD) {
+        velocity = pid_update(&arm_info->pid[i], arm_info->target_angle[i],
+                              arm_info->measured_angle[i],
+                              ARM_PID_DT_SECONDS);
+      } else {
+        pid_reset(&arm_info->pid[i]);
+      }
+
+      const float rate = velocity * pulses_per_joint_revolution[i] / TWO_PI_F;
+      atomic_set(&arm_info->pid_rate_pps[i],
+                 isfinite(rate) ? (atomic_val_t)lroundf(rate) : 0);
+    }
+  }
+
+  k_work_reschedule_for_queue(&work_q, &arm_info->pid_work_item,
+                              K_MSEC(ARM_PID_PERIOD_MS));
+}
+
 /* timer to write to stepper motors*/
 void stepper_timer_handler(struct k_timer *stepper_timer_ptr) {
+  ARG_UNUSED(stepper_timer_ptr);
+
   for (int i = 0U; i < ARRAY_SIZE(stepper_motor); i++) {
-    arm.pos[i] = Stepper_motor_write(&stepper_motor[i], arm.dir[i], arm.pos[i]);
+    if (!atomic_get(&arm.closed_loop_enabled)) {
+      arm.pos[i] =
+          Stepper_motor_write(&stepper_motor[i], arm.dir[i], arm.pos[i]);
+      continue;
+    }
+
+    const int rate_pps = (int)atomic_get(&arm.pid_rate_pps[i]);
+    if (rate_pps == 0) {
+      arm.pulse_accumulator[i] = 0U;
+      continue;
+    }
+
+    arm.pulse_accumulator[i] +=
+        (uint32_t)abs(rate_pps) * STEPPER_PHASES_PER_PULSE;
+    if (arm.pulse_accumulator[i] >= STEPPER_TIMER_HZ) {
+      arm.pulse_accumulator[i] -= STEPPER_TIMER_HZ;
+      const enum StepperDirection direction =
+          rate_pps > 0 ? HIGH_PULSE : LOW_PULSE;
+      arm.pos[i] =
+          Stepper_motor_write(&stepper_motor[i], direction, arm.pos[i]);
+    }
   }
 }
 
@@ -429,8 +510,25 @@ int main() {
   k_work_init(&(drive.drive_work_item), drive_work_handler);
   k_work_init(&(drive.auto_drive_work_item), auto_drive_work_handler);
   k_work_init(&(arm.channel_work_item), arm_channel_work_handler);
+  k_work_init_delayable(&(arm.pid_work_item), arm_pid_work_handler);
   k_work_init(&(drive_com.cobs_rx_work_item), cobs_rx_work_handler);
   k_work_init(&(com_tx.sbc_tx_work_item), sbc_tx_work_handler);
+
+  const struct pid_config arm_pid_config = {
+      .kp = 1.0f,
+      .ki = 0.0f,
+      .kd = 0.0f,
+      .output_min = -0.20f,
+      .output_max = 0.20f,
+      .integral_min = -0.04f,
+      .integral_max = 0.04f,
+      .derivative_filter_tau = 0.05f,
+  };
+  for (size_t i = 0U; i < ARRAY_SIZE(arm.pid); i++) {
+    pid_init(&arm.pid[i], &arm_pid_config);
+    atomic_set(&arm.pid_rate_pps[i], 0);
+  }
+  atomic_set(&arm.closed_loop_enabled, false);
 
   /* initializing drive configs */
   const struct DiffDriveConfig tmp_drive_config = {
@@ -533,6 +631,8 @@ int main() {
   /* start running work queue */
   k_work_queue_start(&work_q, stack_area, K_THREAD_STACK_SIZEOF(stack_area),
                      PRIORITY, NULL);
+  k_work_schedule_for_queue(&work_q, &arm.pid_work_item,
+                            K_MSEC(ARM_PID_PERIOD_MS));
 
   /* enable interrupt to receive sbus data */
   uart_irq_rx_enable(sbus_uart);

@@ -7,5 +7,6 @@ if(CONFIG_Tarzan)
 	${Tarzan_DIR}/lib/arm.c
 	${Tarzan_DIR}/lib/cobs.c
 	${Tarzan_DIR}/lib/madgwick.c
+	${Tarzan_DIR}/lib/pid.c
         )
 endif()
